@@ -1,0 +1,120 @@
+---
+title: "resident_EU"
+output: html_document
+date: "2023-06-11"
+---
+
+## residential emissions for EU
+
+```{r}
+rm(list = ls())# delete all environmental data
+setwd("E:/EU/Cities")   #EDIT TO YOUR WORKING DIRECTORY. If you use my file structure and naming conventions
+#within your WD, you shouldn't need to edit any other file names
+
+library(raster)
+library(randomForest)
+```
+
+```{r}
+name_vec <- c("PLO") #Edit this for your cities with the 'XYZ' abbreviations for city names
+n <- length(name_vec)
+
+for(i in 1:n){
+
+  pop_string <- paste("./collection/POP_",name_vec[i],".tif", sep="", collapse = "")
+  c_string <- paste("./collection/GID_res_",name_vec[i],".tif", sep="", collapse = "")
+  LU_string <- paste("./collection/LU_",name_vec[i],".tif", sep="", collapse = "")
+  res_string <- paste("./Results/Residential/Results_res_",name_vec[i],".tif", sep="", collapse = "")
+# Data --------------------------------------------------------------------
+  
+###### Fill Population #######
+
+
+fill_pop <- raster(pop_string)                               
+fill_pop[is.na(fill_pop)==T] = 0
+
+#plot(fill_pop)
+#writeRaster(fill_pop, pop_wr_string)
+
+#### Load data #####
+
+# Population per cell 1000*1000 (value - 0-25000)
+#pop <- raster("./Copenhagen/cph_pop_fill.tif")   
+pop <- fill_pop
+
+# GID emission (kt CO???/cell) (value - 0-120000)
+GID <- raster(c_string)                                
+# Building type UA 20*20
+landcover <- raster(LU_string)                             
+
+# Make population 20*20 (value - 0-10)
+pop_100 <- disaggregate(pop, fact=1000/100)
+pop_100 <- pop_100/(1000/100)^2
+
+#crs(GID)
+#crs(pop)
+# GID to 1000*1000 (kt CO???/cell) 
+gid_1000 <- resample(GID, pop, method="ngb")
+#gid_1000 <- gid_1000/(4836/120) 
+gid_1000 <- gid_1000/(res(GID)[1]/res(pop)[1])^2                                                #@CONG: Do we need to change these numbers? Where do they come from?
+
+# GID to 20*20
+gid_100 <- disaggregate(gid_1000, fact=1000/100)
+gid_100 <- gid_100/(1000/100)^2
+
+
+# Per capita result (value - 0-1500)
+# gid_20_pc <- gid_20/pop_20
+
+
+# Residential land use
+landres <- landcover
+#head(landres)
+values(landres)[values(landres) > 2] = NA
+
+# Emission for residential, consider density
+values(landres)[values(landres) == 1] = 1                                    #@CONG: Maybe we need to discuss these densities since the new LU data has updated codes
+values(landres)[values(landres) == 2] = 0.5
+#values(landres)[values(landres) == 11220] = 0.4
+#values(landres)[values(landres) == 11230] = 0.2
+#values(landres)[values(landres) == 11240] = 0.05
+#values(landres)[values(landres) == 11300] = 0.01
+
+# Align residential land use
+landres_nor <- resample(landres, pop_100, method = "ngb")
+
+# Regression, with population and building density as independent variables--------
+data <- cbind.data.frame(getValues(gid_100), getValues(landres_nor),getValues(pop_100))
+colnames(data) <- c("emission", "building", "population")
+df <- na.omit(data)
+rm(GID, gid_1000, landcover, landres, pop)
+
+# Linear
+# model <- lm(emission ~ building + population, data = df_rf)
+ variables <- data[,c(2,3)]
+# pred <- predict(model, variables)
+# result <- raster(matrix(pred, ncol = landres_nor@ncols, byrow = TRUE))
+# extent(result) <- extent(landres_nor)
+# crs(result) <- crs(landres_nor)
+# plot(result)
+# writeRaster(result, filename="test.tif", overwrite=TRUE)
+
+# Local Polynomial (SLOW)
+# model.lo <- loess(emission ~ building + population, data = data)
+
+# Random Forest
+
+df_rf <- df[sample(nrow(df), nrow(df)/10), ]
+model.rf <- randomForest(emission ~ .,  data=df_rf)
+pred <- predict(model.rf, variables)
+result <- raster(matrix(pred, ncol = landres_nor@ncols, byrow = TRUE))
+extent(result) <- extent(landres_nor)
+crs(result) <- crs(landres_nor)
+#plot(result)
+
+writeRaster(result,res_string)                       
+print(name_vec[i])
+
+}
+```
+

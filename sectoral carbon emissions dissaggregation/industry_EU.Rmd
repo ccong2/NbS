@@ -1,0 +1,91 @@
+---
+title: "industry_EU"
+output: html_document
+date: "2023-06-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## industrial emissions for EU
+
+```{r}
+rm(list = ls())# delete all environmental data
+setwd("E:/EU/Cities")   #EDIT TO YOUR WORKING DIRECTORY. If you use my file structure and naming conventions
+#within your WD, you shouldn't need to edit any other file names
+
+library(raster)
+```
+
+```{r}
+# 1. Prepare data: To run this you will need to have prepared 
+# - the industry GID files
+# - landuse files
+
+name_vec <- c("") #Edit this for your cities with the 'XYZ' abbreviations for city names
+n <- length(name_vec)
+
+for(i in 1:n){
+
+  c_string <- paste("./collection/GID_res_",name_vec[i],".tif", sep="", collapse = "")
+  LU_string <- paste("./collection/LU_",name_vec[i],".tif", sep="", collapse = "")
+  res_string <- paste("./Results/Industry/Results_ind_",name_vec[i],".tif", sep="", collapse = "")
+  
+# Read industry emission gid
+gid <- raster(c_string)
+
+# Extract industry land use
+landcover <- raster(LU_string)
+extent(landcover) <- extent(gid)
+
+landind <- landcover
+values(landind)[values(landind) != 3] = NA   #The LU category "Industrial or commercial units" has the value label 3 in our LU files
+
+# Alternative - commercial + industry: 11100 - 11240
+# landmix <- landcover
+# values(landmix)[values(landmix) < 11100 | values(landmix) > 11240] = NA   #check LU codes if using this
+
+# ----------Zonal Statistics
+# Make an id raster for the carbon grid. This will be used for the zonal statistics
+row <- nrow(gid)
+col <- ncol(gid)
+s <- raster(nrow = row, ncol = col)
+extent(s) <- extent(gid)
+crs(s) <- crs(landind)
+s <- setValues(s, seq(1:length(getValues(gid))))
+
+# Dissaggregate it to 20*20 but keep the id values
+sr <- resample(s, landind, method="ngb")
+unique(getValues(sr))
+
+# Align rasters to prepare for the next step
+extent(landind) <- extent(sr)
+
+# This will give you the number of industry pixels in each big zone
+test <- zonal(landind, sr, fun='sum', digits=0, na.rm=TRUE) 
+
+# Make it a new raster
+p <- raster(nrow = row, ncol = col)
+extent(p) <- extent(sr)
+crs(p) <- crs(sr)
+p <- setValues(p, test[,2])
+
+# Then dissaggregate the resolution to 20*20
+pr <- resample(p, landind, method="ngb")
+
+# ----------#GID cell(constant)/#industry cell 
+# Align the resolution and divide.
+carbonresample <- resample(gid, landind, method="ngb")
+#range(getValues(carbonresample), na.rm = TRUE) #min0.0, max105448.4
+x <- carbonresample/pr
+#plot(x)
+
+# Assign it back to industry landuse, so that only the industry places have emmission values
+result <- x * landind/3
+#plot(result)
+
+writeRaster(result,res_string)  
+print(name_vec[i])
+}
+```

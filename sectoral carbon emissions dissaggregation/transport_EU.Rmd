@@ -1,0 +1,88 @@
+---
+title: "transport_EU"
+output: html_document
+date: "2023-06-11"
+---
+
+## transport emisisons for EU
+
+```{r}
+rm(list = ls())# delete all environmental data
+setwd("E:/EU/Cities")   #EDIT TO YOUR WORKING DIRECTORY. If you use my file structure and naming conventions
+#within your WD, you shouldn't need to edit any other file names
+
+for (pkg in c("raster","rgdal","rgeos","tidyverse","sf","osmdata")) {
+  library(pkg, character.only = TRUE)
+}
+```
+
+```{r}
+name_vec <- c("PLO") #Edit this for your cities with the 'XYZ' abbreviations for city names
+n <- length(name_vec)
+
+for(i in 1:n){
+
+
+c_string <- paste("./collection/GID_trans_",name_vec[i],".tif", sep="", collapse = "")
+r_string <- paste("./OSM_capitals_processed/OSM_",name_vec[i],"_binary_clip.tif", sep="", collapse = "")#
+
+carbongrid <- raster(c_string)                        
+road <- raster(r_string)                         
+
+
+#crs(road)<-crs(carbongrid)
+#extent(road) <- extent (carbongrid)
+crs(carbongrid)<-crs(road)
+extent(carbongrid) <- extent (road)
+    
+#This will be used for the zonal statistics
+#carbongrid #get the nrow and ncol for the grids, edit below 
+row <- nrow(carbongrid)
+col <- ncol(carbongrid)
+s <- raster(nrow = row, ncol = col)                                             
+
+extent(s) <- extent(carbongrid)
+crs(s) <- crs(road)
+s <- setValues(s, seq(1:length(getValues(carbongrid))))
+
+# Dissaggregate it to 100*100 but keep the id values
+sr <- resample(s, road, method="ngb")
+unique(getValues(sr))
+
+# Align rasters
+
+extent(sr) <- extent(road)
+    
+# 3.1 Zonal statistics - 
+#this will give you the number of road pixels in each big zone
+test <- zonal(road, sr, fun='sum', digits=0, na.rm=TRUE) 
+
+# 3.2 To associate it back with the big zone, I first make another 
+#raster using all the pixels value from step 3.1
+p <- raster(nrow = row, ncol = col)            
+
+extent(p) <- extent(carbongrid)
+crs(p) <- crs(road)
+p <- setValues(p, test[,2])
+
+# The same way to dissaggregate it to 100*100
+pr <- resample(p, road, method="ngb")
+
+# #GIDcell(constant)/#roadcell
+carbonresample <- resample(carbongrid, road, method="ngb")
+#range(getValues(carbonresample), na.rm = TRUE) #min0.0, max105448.4
+x <- carbonresample/pr
+#plot(x)
+
+# 3.3 Assign it back to road network, 
+#so that only roads have emmission values
+result <- x * road                                                          
+#plot(result)
+
+res_string <- paste("./Results/Transport/Results_Trans_",name_vec[i],".tif", sep="", collapse = "", overwrite=TRUE)
+
+writeRaster(result, res_string) 
+print(name_vec[i])
+}
+```
+
