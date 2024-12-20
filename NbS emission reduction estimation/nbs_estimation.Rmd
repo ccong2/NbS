@@ -1,0 +1,364 @@
+---
+title: "NBS_estimate"
+output: 
+  html_document
+date: "`r Sys.Date()`"
+---
+
+
+## Prepare data  
+  
+```{r setup, eval = FALSE, include=FALSE}
+### This section repeats the process of mapping NBS approaches, using population, land cover and emission by sector data 
+### Skip it if you already have the color-coded maps** - Jump to the next section to bring the color-coded map in.
+pop <- raster("pop_tot_stock_corine.tif")
+lu <- raster("landcover_STK_clip.tif")
+ind <- raster("industry_emission_stockholm_1113.tif")
+trans <- raster("road_emission_stockholm_1113.tif")
+res <- raster("resident_emission_stockholm_1113.tif")
+
+crs(lu) <- crs(ind)
+crs(trans) <- crs(ind)
+crs(pop) <- crs(ind)
+extent(lu) <- extent(ind)
+extent(trans) <- extent(ind)
+extent(pop) <- extent(ind)
+lu <- resample(lu,ind,method = "bilinear")
+trans <- resample(trans,ind,method = "bilinear")
+res <- resample(res,ind,method = "bilinear")
+pop <- resample(pop,ind,method = "bilinear")
+
+# Select areas that need treatment
+new <- raster(trans)
+new[] <- 1
+
+fun_1 <- function(x,y){ifelse( x == 10 | x == 11 , 2*y, y)} 
+fun_2 <- function(x,y){ifelse( x > quantile(trans,0.90) , 3*y, y)}
+fun_3 <- function(x,y){ifelse( x > quantile(ind,0.90) , 5*y, y)}
+fun_4 <- function(x,y){ifelse( x > quantile(res,0.95) , 7*y, y)}
+fun_5 <- function(x,y,z){ifelse( x > quantile(trans,0.90) & y > quantile(pop,0.75), 11*z, z)}
+fun_6 <- function(x,y,z){ifelse( x >= 22 & y <= quantile(pop,0.8), 13*z, z)}
+fun_7 <- function(x,y){ifelse( x > quantile(res,0.90) , 17*y, y)}
+
+
+new <- overlay(lu,new,fun=fun_1)
+new[is.na(new[])] <- 1
+new <- overlay(trans,new,fun=fun_2)
+new[is.na(new[])] <- 1
+new <- overlay(ind,new,fun=fun_3)
+new[is.na(new[])] <- 1
+new <- overlay(res,new,fun=fun_4)
+new[is.na(new[])] <- 1
+new <- overlay(trans,pop,new,fun=fun_5)
+new[is.na(new[])] <- 1
+new <- overlay(lu,pop,new,fun=fun_6)
+new[is.na(new[])] <- 1
+new <- overlay(res,new,fun=fun_7)
+new[is.na(new[])] <- 1
+
+# add stockholm boundary
+crop_extent <- readOGR("Kommuner_combined.shp")
+
+crop_extent <- spTransform(crop_extent, CRS(proj4string(new)))
+
+nbs <- mask(new, crop_extent)
+nbs[is.na(nbs[])] <- 1
+# writeRaster(r,'test.tif',options=c('TFW=YES'))
+```
+
+Start with one of the NbS approach implementation maps for the 50 cities in Europe.  
+I used Stockholm as an example.  
+```{r message=FALSE, warning=FALSE}
+library(raster)
+library(ggplot2)
+library(tibble)
+#library(rgdal)
+nbs <- raster("Stockholm_emission/nbs.tif")
+```
+
+The stockholm map has a bunch of prime number representing potential NBS approaches.   
+```{r}
+#plot(nbs)
+sort(unique(getValues(nbs)))
+```
+
+## Create distribution  
+In the following table, each NbS approach may have direct "carbon reduction" effect, based on the "param" percentages referenced from the literature. E.g., the third line reads: road greening can reduce carbon emission from the transportation sector by 14%.   
+Some NbS increases vegetation sequestration, based on the implementation areas on the map. Here the "param" is also values from the literature, while "adj" indicates how to convert/apply this parameter to the map. E.g. the second line reads: 1 km2 of urban forest can create carbon sequestration of 58.3-79.5 ton CO2 per year.    
+
+|    Approach     |  ID |       Use         |    Sector      |   param   |       adj      |  var  |
+|:----------------|-----|-------------------|----------------|-----------|----------------|-------|
+|  Urban Forest   |  2  |  Carbon reduction |  all sectors   | 0.08%-2%  |           1    | uf_r  |
+|  Urban Forest   |  2  |  Sequestration    |   per km2      | 58.3-79.5 |$30\times 30/10^6$| uf_s  |
+|  Road Greening  | 11  |  Carbon reduction | transportation |    14%    |           1    | rd_r  |
+|  Road Greening  |  3  |  Sequestration    |   per m2       | 0.0008304 |$30\times 30\times 0.3$| rd_s  |
+|  Green belt     | 13  |  Sequestration    |   per m        |  0.07729  |      30        |  gb   |
+|  Green roof     |  7  |  Carbon reduction |   res, ind     |  11-19%   |           1    | gr_r  |
+|  Green roof     |  7  |  Sequestration    |   per m2       |1.703-1.889|$0.4\times 30\times 30/10^3$| gr_s  |
+| GI for industry |  5  |  Carbon reduction |   industry     |  18.6%    |           1    | gind  |
+| Green Access    | 17  |  Carbon reduction |  all sectors   |    10%    |           1    |  gc   |
+
+This section determines the average, upper and lower boundaries of carbon reduction for each type of land use to create normal distributions.   
+```{r}
+set.seed(42)
+###(2) Urban forest
+# Carbon reduction
+LO = 0.001
+M = 0.01
+UP = 0.022
+S = (UP-LO)/6 # suppose UP-LO cover an area of 3*sigma
+uf_r = rnorm(n = 1000, mean = M, sd = S)
+# Sequestration
+LO = 58.3
+M = 79.5 
+#UP = 216
+S = (M-LO)/3 # suppose LO-M cover an area of 3*sigma
+uf_s = rnorm(n = 1000, mean = M, sd = S)
+
+###Road greening
+#(11) Carbon reduction
+LO = 0
+M = 0.14 #14%
+UP = 0.2
+S = (UP-M)/3 # suppose M-LO cover an area of 3*sigma
+rd_r = rnorm(n = 1000, mean = M, sd = S)
+#(3) Sequestration
+LO = 0
+M = 0.00084 
+S = (M-LO)/3 # suppose M-LO cover an area of 3*sigma
+rd_s = rnorm(n = 1000, mean = M, sd = S)
+
+###(13) Green belt
+#Sequestration
+LO = 0
+M = 0.07729
+S = (M-LO)/3 # suppose M-LO cover an area of 3*sigma
+gb = rnorm(n = 1000, mean = M, sd = S)
+
+###(7). Green roof 
+# Sequestration
+LO = 1.703
+M = 1.78
+UP = 1.889
+S = (UP-LO)/6 # suppose UP-LO cover an area of 6*sigma
+gr_s = rnorm(n = 1000, mean = M, sd = S)
+
+# Carbon Reduction
+LO = 0.11
+UP = 0.19
+M = 0.14
+S = (UP-LO)/6 # suppose UP-LO cover an area of 3*sigma
+gr_r = rnorm(n = 1000, mean = M, sd = S)
+
+###(5). GI for ind (% of reduction of total INDUSTRY EMISSION)  
+LO = 0.11
+M = 0.186 
+UP = 0.24
+S = (UP-M)/3 # suppose UP-M cover an area of 3*sigma
+gind = rnorm(n = 1000, mean = M, sd = S)
+
+###(17). Improve green access 
+# Carbon reduction
+LO = 0.09
+UP = 0.11
+M = 0.103
+S = (UP-LO)/6 
+gc = rnorm(n = 1000, mean = M, sd = S)
+```
+
+## Sample a group of values.  
+Run simulation once and get 9 values, corresponding to the table in the beginning.    
+```{r}
+df <- data.frame(c(2, 2, 11, 3, 13, 7, 7, 5, 17), 
+                 c("carbon", "sequestration", "carbon", "sequestration","sequestration", "carbon", "sequestration", "carbon", "carbon"),
+                 c(sample(uf_r, 1), sample(uf_s, 1), sample(rd_r, 1), sample(rd_s, 1), 
+                   sample(gb, 1), sample(gr_r, 1), sample(gr_s, 1), sample(gind, 1), sample(gc, 1)))
+colnames(df) <- c("id", "type", "param")
+```
+
+Add the "adj" column in df for calculation.   
+```{r}
+# Assumptions
+CELL = 30  # Resolution/cell length
+TREE = 0.3 # Tree shades cover 50% of streetscape cell areas
+ROOF = 0.4 # Green roof can be implemented on 60% of cell areas
+
+adj <-  c(1, CELL^2/10^6, # area adjusted from km2 to m2
+          1, CELL^2*TREE, # area*tree shade percentage
+          CELL, 1, ROOF*CELL^2/10^3, 1, 1)
+df <- cbind.data.frame(df, adj)
+rm(list=ls()[! ls() %in% c("df","nbs")])
+```
+
+### Build emission calculation functions
+We know from the map of prime numbers (nbs), the areas for implementing each type of NBS (or NBS combination), and the prime number indicating specific approaches.   
+First create a function to decompose the prime numbers:    
+
+```{r}
+# Prime Factorization  
+prime_fac <- function(num) {
+  up = floor(num**0.5 + 1)
+  ans = c()
+  for (i in 2:up){
+    while (num %% i == 0){
+      num = num/i
+      ans = append(ans, i)
+    }
+  }
+  if (num != 1){
+    ans = append(ans, num)
+  }
+  return(ans)
+}
+```
+
+As we have two approaches for emission reduction:  
+* Based on area or existing physical features  
+* Based on existing emission  
+We will read in the emission maps for the subsequent calculation.   
+```{r message=FALSE, warning=FALSE}
+emission_ind <- raster("industry_emission_stockholm_0609.tif")
+emission_res <- raster("resident_emission_stockholm_1113.tif")
+emission_tran <- raster("road_emission_stockholm_1113.tif")
+emission_res <- crop(emission_res, emission_tran)
+emission_ind <- crop(emission_ind, emission_tran)
+
+emission_res <- getValues(emission_res)
+emission_ind <- getValues(emission_ind)
+emission_tran <- getValues(emission_tran)
+```
+
+The following code block adds up carbon reduction and sequestration effects for each NbS approach.   
+```{r}
+# Set up variables  
+res_reduction = 0
+ind_reduction = 0
+tran_reduction = 0
+totalsequ = 0
+
+# Create a new raster with the initial value 0 to record the accumulated spatial reductions
+initial_raster <- raster(nrow = nbs@nrows, ncol=nbs@ncols)
+values(initial_raster) = 0
+# reductionmap <-  getValues(initial_raster)
+sequestrationmap <- getValues(initial_raster)
+source = getValues(nbs)
+
+# for every prime number 
+  # check if the prime number is factored by one of the 9 values in the table, 
+   # if the prime number consists of 2 - calculate urban forest carbon reduction and sequestration
+     ## carbon reduction is calculated by param (percentage) * emission (by sector)
+     ## sequestration is calculated by area * param (carbon reduction per area unit) * adj (unit conversion)
+   # if the prime number consists of  3 - calculate road green sequestration
+# so on and so forth
+#===Note: only calculated urban land (omitted value 2)==
+for (num in unique(getValues(nbs))[-1]){ # remove number 1 - default number, not in the prime list
+  # loop through each unique prime multiplication value in nbs,
+  for (id in c(3, 7, 13)){ # sequestration for urban forest, road green, green belt and green roof
+    if (id %in% prime_fac(num)){
+      # if num contains a certain nbs value (e.g. 3), all cells that are equal to num should be implemented by road greening. Based on the parameters, sequestration will be param*adj on each cell
+      PARAM = df[df$id == id & df$type == "sequestration", ]$param
+      ADJ = df[df$id == id & df$type == "sequestration", ]$adj
+      # draw map
+      sequestrationmap[which(source %in% c(num))] = sequestrationmap[which(source %in% c(num))] + PARAM * ADJ 
+      # accumulate emission reduction values
+      totalsequ = totalsequ + sum(getValues(nbs) == num) * PARAM * ADJ
+    }
+  }
+  #print(c(num, totalsequ))
+  for (id in c(5, 7, 11, 17)){
+    if (id %in% prime_fac(num)){
+      PARAM = df[df$id == id & df$type == "carbon", ]$param
+      if (id == 17){
+        #reductionmap[which(source %in% c(num))] = reductionmap[which(source %in% c(num))] + emission_res[which(source %in% c(num))] * PARAM + emission_ind[which(source %in% c(num))] * PARAM+ emission_tran[which(source %in% c(num))] * PARAM
+        res_reduction = res_reduction + sum(emission_res[which(source %in% c(num))], na.rm = TRUE) * PARAM
+        ind_reduction = ind_reduction + sum(emission_ind[which(source %in% c(num))], na.rm = TRUE) * PARAM
+        tran_reduction = tran_reduction + sum(emission_tran[which(source %in% c(num))], na.rm = TRUE) * PARAM
+      }
+      else if (id == 11){
+        #reductionmap[which(source %in% c(num))] = reductionmap[which(source %in% c(num))] + emission_tran[which(source %in% c(num))] * PARAM * ADJ
+        tran_reduction = tran_reduction + sum(emission_tran[which(source %in% c(num))], na.rm = TRUE) * PARAM
+      }
+      else if (id == 7){
+        #reductionmap[which(source %in% c(num))] = reductionmap[which(source %in% c(num))] + emission_res[which(source %in% c(num))] * PARAM * ADJ + emission_ind[which(source %in% c(num))] * PARAM * ADJ
+        res_reduction = res_reduction + sum(emission_res[which(source %in% c(num))], na.rm = TRUE) * PARAM
+        ind_reduction = ind_reduction + sum(emission_ind[which(source %in% c(num))], na.rm = TRUE) * PARAM
+      }
+      else {
+        #reductionmap[which(source %in% c(num))] = reductionmap[which(source %in% c(num))] + emission_ind[which(source %in% c(num))] * PARAM * ADJ
+        ind_reduction = ind_reduction + sum(emission_ind[which(source %in% c(num))], na.rm = TRUE) * PARAM
+      }
+    }
+  }
+  #print(c(num, res_reduction, ind_reduction, tran_reduction, totalsequ))
+}
+```
+
+
+## Produce maps
+```{r}
+# ===I only created sequestration maps in this section,
+# ===if you also want to create carbon reduction maps by sector, un-comment the lines for making maps in the loop function above as well as the following three lines
+# final_carbon <- raster(matrix(reductionmap, ncol = nbs@ncols, byrow = TRUE))
+# extent(final_carbon) <- extent(nbs)
+# crs(final_carbon) <- crs(nbs)
+# 
+final_sequestration <- raster(matrix(sequestrationmap, ncol = nbs@ncols, byrow = TRUE))
+extent(final_sequestration) <- extent(nbs)
+crs(final_sequestration) <- crs(nbs)
+```
+
+## Values and percentages  
+How much do they take in the total emissions.   
+```{r}
+all <- unique(getValues(nbs))[-1]
+# carbon reduction by sector
+urban_res_emission <- sum(emission_res[which(source %in% c(all))], na.rm = TRUE) 
+urban_ind_emission <- sum(emission_ind[which(source %in% c(all))], na.rm = TRUE) 
+urban_tran_emission <- sum(emission_tran[which(source %in% c(all))], na.rm = TRUE) 
+res_reduction/urban_res_emission
+ind_reduction/urban_ind_emission
+tran_reduction/urban_tran_emission
+# sequestration
+totalsequ/sum(emission_res+emission_ind+emission_tran, na.rm = TRUE) 
+```
+If you want to summarize results in a csv
+```{r}
+table <- tibble(
+  Emission_Type = c("Residential", "Industry", "Transportation"),
+  Total_Emission = c(urban_res_emission, urban_ind_emission, urban_tran_emission),
+  Saving_Rate = c(paste0(round(res_reduction*100/urban_res_emission, 1), "%"),
+                  paste0(round(ind_reduction*100/urban_ind_emission, 1), "%"),
+                  paste0(round(tran_reduction*100/urban_tran_emission, 1), "%")),
+  City_Name = "Stockholm")
+table
+#write.csv(table, "result.csv", row.names = FALSE)
+```
+
+
+## Make the waterfall graph   
+```{r}
+balance <- data.frame(desc = c('residential_emission', 'residential_reduction', 'industry_emission', 'industry_reduction', 'transportation_emission','transportation_reduction','sequestration'),
+                      amount = c(urban_res_emission, -res_reduction, urban_ind_emission, -ind_reduction, urban_tran_emission, -tran_reduction, -totalsequ/10^3))
+balance$desc <- as.factor(balance$desc)
+levels(balance$desc) <- c("1","2","3","4","5","6","7")
+balance$id <- seq_along(balance$amount)
+balance$type <- ifelse(balance$amount>0, "emission", ifelse(balance$desc == "sequestration", "sequestration", "reduction"))
+
+# end is the cumulative sum of the amount
+# start is the end variable with a lag
+balance$end <- cumsum(balance$amount)
+balance$start <- c(0, head(balance$end, -1))
+balance <- balance[, c(3,1,4,6,5,2)]
+
+balance$type <- as.factor(balance$type)
+ggplot(balance, aes(x=desc, fill=type))+
+  geom_rect(aes(desc, xmin = id-0.45, xmax = id+0.45,
+                ymin=end, ymax = start)) +
+  theme_bw()+
+  scale_x_discrete(labels=c("1" = "Residential", "2" = " ","3" = "Industry",
+                            "4"= " ", "5" = "Transportation", "6" = " ", "7" = "Sequestration"),
+                   name = "Emission and carbon reduction items by sector")+
+  scale_y_continuous(name = "ton-CO2 /m²/yr")
+  
+```
+
