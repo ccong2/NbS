@@ -1,0 +1,200 @@
+---
+title: "Carbon emission per capita under different SSPs & RCPs"
+author: "Zipan Cai"
+date: "2024-12-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(readxl)
+```
+
+1. Set up parameters
+```{r}
+# Baseline year (t0) in your city-level data
+t0 <- 2020   
+# Closest baseline year in CMIP6 data (t1) and projected year (t2)
+t1 <- 2020
+t2 <- 2030
+```
+
+2. Read data
+```{r, read_data, message = FALSE, warning = FALSE}
+# CMIP6-based regional SSP input data 
+#  - "SSP_CMIP6_201811.xlsx" (sheet = "SSP_scenarios")  
+# Columns assumed: region, year, scenario, emission
+# Example row: region='EU_Central', year=2020, scenario='SSP1', emission=xxx
+ssps <- read_excel("SSP_CMIP6_201811.xlsx", sheet = "SSP_scenarios") 
+
+# City-level baseline emissions E(t0,n)
+# - "city_baseline_emissions.xlsx"
+# Columns assumed: city, region, baseline_em
+city_baseline <- read_excel("city_baseline_emissions.xlsx") 
+
+# NbS rates and sectors
+# - "NbS.xlsx" (sheet = "NbS_by_city_sector")
+# Columns assumed: city, sector, emission_reduction
+nbs_data <- read_excel("NbS.xlsx", sheet = "NbS_by_city_sector") 
+
+# Sequestration parameters
+# - "Sequestration.xlsx" (sheet = "Sequestration_params")
+# Columns assumed: city, s_rate, c_index
+seq_data <- read_excel("Sequestration.xlsx", sheet = "Sequestration_params") %>%
+  rename(
+    city = city,
+    S_n  = s_rate,   # S_n
+    C_rn = c_index   # C_(r_n)
+  )
+# Shared Climate Policy Assumptions (SPA) => m_(l,r_n)
+# - Also in "SSP_CMIP6_201811.xlsx" (sheet = "SPA_converted_rates")
+# Columns assumed: region, sector, scenario, spa_rate
+spa_data <- read_excel("SSP_CMIP6_201811.xlsx", sheet = "SPA_converted_rates") 
+
+# Population Projections
+# - "Population_Projections.xlsx" (sheet = "pop_2030")
+# Columns assumed: city, ssp, pop_2030
+pop_data <- read_excel("Population_Projections.xlsx", sheet = "pop_2030")
+```
+
+3. Define calculation equations
+```{r, equations, message = FALSE, warning = FALSE}
+calc_E_s_n <- function(E_t0_n, E_rn_t1_s, E_rn_t2_s, t0, t1, t2) {
+  E_s_n <- E_t0_n * (
+    1 + ((E_rn_t2_s - E_rn_t1_s) * (t2 - t0) / E_rn_t1_s)
+  )
+  return(E_s_n)
+}
+
+calc_E_c_n <- function(E_t0_n, sum_rmn, S_n, C_rn) {
+  E_c_n <- (E_t0_n * sum_rmn) - (S_n * C_rn)
+  return(E_c_n)
+}
+```
+
+4. Prepare CMIP6 (SSP) data and join city baseline emissions with regional SSP data
+```{r, message = FALSE, warning = FALSE}
+# Filter to the years of interest (t1, t2), pivot, and rename
+ssps_long <- ssps %>%
+  filter(year %in% c(t1, t2)) %>%
+  select(region, year, scenario, emission) %>%
+  pivot_wider(names_from = year, values_from = emission, names_prefix = "year_") %>%
+  rename(
+    E_rn_t1 = paste0("year_", t1),
+    E_rn_t2 = paste0("year_", t2)
+  )
+# For each city, pair up with each scenario and get E_rn_t1, E_rn_t2
+city_scenario <- city_baseline %>%
+  # Cartesian join with all scenarios in ssps_long, so each city has each scenario
+  crossing(scenario = unique(ssps_long$scenario)) %>%
+  left_join(ssps_long, by = c("region", "scenario")) %>%
+  # E_t0_n is the baseline emission
+  rename(E_t0_n = baseline_em)
+
+# Compute E_s_n (Equation (6)) for each city & scenario
+city_scenario <- city_scenario %>%
+  mutate(
+    E_s_n = calc_E_s_n(E_t0_n, E_rn_t1, E_rn_t2, t0, t1, t2)
+  )
+```
+
+5. Calculate sector-specific sector-specific NbS reduction * SPA rate => sum_rmn
+```{r, message = FALSE, warning = FALSE}
+# Merge city-level r_(l,n) with city -> region
+nbs_region <- nbs_data %>%
+  left_join(city_baseline %>% select(city, region), by = "city") 
+
+# Join with SPA data => gives r_(l,n)*m_(l,r_n)
+nbs_spa <- nbs_region %>%
+  left_join(spa_data, by = c("region", "sector", "scenario")) %>%
+  rename(r_ln   = emission_reduction,
+         m_l_rn = spa_rate)
+
+# Summation across sectors for each city & scenario
+city_rmn <- nbs_spa %>%
+  group_by(city, scenario) %>%
+  summarise(
+    sum_rmn = sum(r_ln * m_l_rn, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Merge sum_rmn and sequestration parameters
+city_final <- city_scenario %>%
+  left_join(city_rmn, by = c("city", "scenario")) %>%
+  left_join(seq_data,  by = "city")
+
+# Replace NA sum_rmn with 0 if necessary
+city_final <- city_final %>%
+  mutate(
+    sum_rmn = if_else(is.na(sum_rmn), 0, sum_rmn),
+    E_c_n   = calc_E_c_n(E_t0_n, sum_rmn, S_n, C_rn)
+  )
+
+# NbS only: (E_t0,n * sum_rmn)
+# NbS + Sequestration: E_c_n (from above)
+city_final <- city_final %>%
+  mutate(
+    E_nbS_only = (E_t0_n * sum_rmn),
+    E_nbS_seq  = E_c_n   # includes sequestration
+  )
+```
+
+6. Compute mitigated emissions 
+```{r, message = FALSE, warning = FALSE}
+# Merge population data (pop_2030) for each city & scenario
+#   note: 'scenario' in city_final might match 'ssp' in pop_data 
+city_final <- city_final %>%
+  left_join(
+    pop_data,
+    by = c("city" = "city", "scenario" = "ssp")
+  ) %>%
+  mutate(
+    # If no population data for that city+scenario, avoid division by zero
+    em_pc_nbS_only = if_else(pop_2030 > 0, E_nbS_only / pop_2030, NA_real_),
+    em_pc_nbS_seq  = if_else(pop_2030 > 0, E_nbS_seq  / pop_2030, NA_real_)
+  )
+
+# Label RCPs for Each SSP 
+#   - SSP1 => RCP1.9
+#   - SSP2 => RCP2.6
+#   - SSP3 => RCP4.5
+#   - SSP4 => RCP6.0
+#   - SSP5 => RCP8.5
+rcp_map <- tribble(
+  ~scenario, ~rcp,
+  "SSP1",    "RCP1.9",
+  "SSP2",    "RCP2.6",
+  "SSP3",    "RCP4.5",
+  "SSP4",    "RCP6.0",
+  "SSP5",    "RCP8.5"
+)
+
+city_final <- city_final %>%
+  left_join(rcp_map, by = "scenario")
+```
+
+7. Final output
+```{r, output, message = FALSE, warning = FALSE}
+final_output <- city_final %>%
+  select(
+    city, region, scenario, rcp, 
+    E_s_n,         # projected baseline in 2030 
+    E_nbS_only,    # with NbS only
+    E_nbS_seq,     # with NbS + sequestration
+    em_pc_nbS_only,
+    em_pc_nbS_seq
+  ) %>%
+  arrange(city, scenario)
+
+# Write to CSV
+write_csv(final_output, "city_emissions_per_capita_2030.csv")
+
+cat("Calculation finished.\n",
+    "Output saved to 'city_emissions_per_capita_2030.csv'.\n")
+
+```
+
